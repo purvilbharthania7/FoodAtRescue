@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  # Common Availability Zone
+
+  AvailabilityZones:
+    Type: String
+    Default: us-east-1a
+    Description: The Region to use. Default Region is us-east-1a.
+
+  CognitoDomain:
+    Type: String
+    MinLength: 3
+    MaxLength: 63
+    AllowedPattern: ^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?$
+    Default: foodatrescuecpool
+    Description: Enter a string. Must be alpha numeric 3-63 in length.
+
+  # For Ec2 Instance
+
+  InstanceTypeParameter:
+    Type: String
+    Default: t2.micro
+    Description: Enter instance size. Default is t2.micro.
+
+  AMI:
+    Type: String
+    Default: ami-04505e74c0741db8d
+    Description: The Linux AMI to use. Default is Ubuntu.
+
+Resources:
+  # For VPC
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      Tags:
+        - Key: Name
+          Value: Food At Rescue
+
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Food At Rescue
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1a
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Food At Rescue Public Subnet (AZ1)
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Food At Rescue Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+  # For Backend
+
+  NodeJSBackend:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AMI
+      InstanceType: !Ref InstanceTypeParameter
+      SubnetId: !Ref PublicSubnet1
+      KeyName: foodatrescue
+      SecurityGroupIds:
+        - !Ref EC2BackendSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Food At Rescue EC2
+
+  EC2BackendSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: NodeJS Backend Security Group
+      GroupDescription: "Allow HTTP/HTTPS and SSH inbound and outbound traffic"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+  # For Dynamo DB
+
+  FoodTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Food
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      TimeToLiveSpecification:
+        AttributeName: "ExpirationTime"
+        Enabled: true
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+    DependsOn:
+      - DynamoDBUser
+
+  DynamoDBUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: DynamoDBUser
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+  DynamoDBUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref DynamoDBUser
+
+  # For S3 Bucket
+  FoodAtRescueS3Bucket:
+    Type: AWS::S3::Bucket
+    Description: Creating Amazon S3 bucket For Storage
+    Properties:
+      BucketName: foodatrescueclient
+      AccessControl: PublicReadWrite
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+    DependsOn:
+      - S3User
+
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: S3User
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  S3UserUserAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref S3User
+
+  # For Elastic Bean Stalk
+  ForntendElasticBeanstalk:
+    Type: AWS::ElasticBeanstalk::Application
+    Properties:
+      ApplicationName: foodatrescuefrontend
+      Description: For Frontend
+  AppVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref ForntendElasticBeanstalk
+      Description: Version 1.0
+      SourceBundle:
+        S3Bucket: foodatrescueebsfile
+        S3Key: "Dockerrun.aws.json"
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      UserPoolName: FoodAtRescue
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: false
+          Required: true
+        - Name: name
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+  UserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      ClientName: FoodAtRescueTesting
+      GenerateSecret: false
+      UserPoolId: !Ref UserPool
+      AllowedOAuthFlowsUserPoolClient: true
+      CallbackURLs:
+        - !Sub https://${CognitoDomain}.auth.us-west-2.amazoncognito.com/
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - phone
+        - email
+        - openid
+        - profile
+      SupportedIdentityProviders:
+        - COGNITO
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Ref CognitoDomain
+      UserPoolId: !Ref UserPool
+Outputs:
+  InstanceId:
+    Description: Instance Id of EC2 Instance
+    Value: !Ref NodeJSBackend
+  PublicDNS:
+    Description: Public DNS of the EC2 Instance
+    Value: !GetAtt
+      - NodeJSBackend
+      - PublicDnsName
+  PublicIP:
+    Description: Public IP of the EC2 Instance
+    Value: !GetAtt
+      - NodeJSBackend
+      - PublicIp
+
+  DynamoDBAccessKeyID:
+    Description: DynamoDb Access Key
+    Value: !Ref DynamoDBUserAccessKey
+  DynamoDBSecretAccessKey:
+    Description: DynamoDb Secret Access Key
+    Value: !GetAtt DynamoDBUserAccessKey.SecretAccessKey
+  DynamoDBUser:
+    Description: DynamoDb User Name
+    Value: !Ref DynamoDBUser
+
+  S3Bucket:
+    Description: S3 Bucket Name.
+    Value: !Ref FoodAtRescueS3Bucket
+  S3AccessKeyID:
+    Description: S3 Access Key
+    Value: !Ref S3UserUserAccessKey
+  S3SecretAccessKey:
+    Description: S3 Secret Access Key
+    Value: !GetAtt S3UserUserAccessKey.SecretAccessKey
+  S3User:
+    Description: DynamoDb User Name
+    Value: !Ref S3User
+
+  CognitoUserPoolID:
+    Value: !Ref UserPool
+    Description: The UserPool ID
+  CognitoAppClientID:
+    Value: !Ref UserPoolClient
+    Description: The app client
+  HostedUIURL:
+    Value: !Sub https://${CognitoDomain}.auth.us-west-2.amazoncognito.com/login?client_id=${UserPoolClient}&response_type=code&scope=email+openid+phone+profile
+    Description: The hosted UI URL
